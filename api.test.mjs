@@ -25,11 +25,17 @@ const mock = http.createServer((req, res) => {
     if (u.startsWith("/get_expenses")) return res.end(JSON.stringify({ expenses }));
     if (u.startsWith("/create_expense")) {
       const p = new URLSearchParams(raw);
+      const users = [];
+      for (let i = 0; p.has(`users__${i}__user_id`); i++) {
+        users.push({
+          user_id: +p.get(`users__${i}__user_id`),
+          paid_share: p.get(`users__${i}__paid_share`),
+          owed_share: p.get(`users__${i}__owed_share`),
+        });
+      }
       const e = { id: Math.floor(Math.random() * 1e6), deleted_at: null, payment: p.get("payment") === "true",
         description: p.get("description"), cost: p.get("cost"), currency_code: p.get("currency_code"),
-        date: new Date().toISOString(),
-        users: [{ user_id: +p.get("users__0__user_id"), paid_share: p.get("users__0__paid_share"), owed_share: p.get("users__0__owed_share") },
-                { user_id: +p.get("users__1__user_id"), paid_share: p.get("users__1__paid_share"), owed_share: p.get("users__1__owed_share") }] };
+        date: new Date().toISOString(), users };
       expenses.push(e);
       return res.end(JSON.stringify({ expenses: [e], errors: {} }));
     }
@@ -45,11 +51,10 @@ process.env.SPLITWISE_TOKEN = "test";
 process.env.SPLITWISE_GROUP_ID = "10";
 process.env.CURRENCY = "UYU";
 process.env.DEFAULT_PRICE = "440";
-process.env.FIRST_TIME_PRICE = "390";
 
 const config = (await import("./api/config.js")).default;
 const members_fn = (await import("./api/members.js")).default;
-const charge = (await import("./api/charge.js")).default;
+const sell = (await import("./api/sell.js")).default;
 const settle = (await import("./api/settle.js")).default;
 const history = (await import("./api/history.js")).default;
 const groups = (await import("./api/groups.js")).default;
@@ -73,6 +78,7 @@ const check = (n, c, x) => (c ? (pass++, console.log("  ✓", n)) : (fail++, con
 try {
   const cfg = await call(config);
   check("config reports token+group", cfg.body.hasToken && cfg.body.hasGroup, cfg.body);
+  check("config has no firstTimePrice", !("firstTimePrice" in cfg.body), cfg.body);
 
   const grp = await call(groups);
   check("groups lists Oficina id 10", grp.body.groups.some((g) => g.id === 10), grp.body);
@@ -81,24 +87,24 @@ try {
   const ana = m.members.find((x) => x.name.startsWith("Ana"));
   const beto = m.members.find((x) => x.name.startsWith("Beto"));
   check("self excluded", !m.members.some((x) => x.name.startsWith("Nacho")));
-  check("Ana not first-time, base 440, owes 440", !ana.firstTime && ana.basePrice === 440 && ana.owes === 440, ana);
-  check("Beto first-time, base 390", beto.firstTime && beto.basePrice === 390, beto);
+  check("Ana owes 440, no firstTime field", ana.owes === 440 && !("firstTime" in ana), ana);
+  check("Beto settled (owes 0)", beto.owes === 0, beto);
 
-  const ch = await call(charge, { method: "POST", body: { userId: beto.id, price: 500 } });
-  check("explicit price override honored (500)", ch.body.cost === 500, ch.body);
+  const before = (await call(history)).body.totalCount;
+  const s = await call(sell, { method: "POST", body: { title: "Tacos", items: [{ userId: ana.id, price: 440 }, { userId: beto.id, price: 410 }] } });
+  check("sell ok, count 2, total 850", s.body.ok && s.body.count === 2 && s.body.total === 850, s.body);
 
-  // no override -> server computes first-time (Ana already charged so 440)
-  const ch2 = await call(charge, { method: "POST", body: { userId: ana.id } });
-  check("no-override Ana charged 440", ch2.body.cost === 440, ch2.body);
-
-  m = (await call(members_fn)).body;
-  check("Beto now not first-time after charge", !m.members.find((x) => x.name.startsWith("Beto")).firstTime);
+  const empty = await call(sell, { method: "POST", body: { title: "x", items: [] } });
+  check("sell with no items is 400", empty.status === 400, empty);
 
   const h = (await call(history)).body;
-  check("history counts burritos, excludes payments", h.totalCount >= 3 && h.history.every((x) => x.cost > 0), { c: h.totalCount });
+  check("totalCount grew by 2 people", h.totalCount === before + 2, { before, after: h.totalCount });
+  const tacos = h.history.find((x) => x.title === "Tacos");
+  check("Tacos row: 2 people, total 850", tacos && tacos.count === 2 && tacos.total === 850, tacos);
+  check("today counts the new sell (2 🌯, $850)", h.todayCount === 2 && h.todayTotal === 850, { c: h.todayCount, t: h.todayTotal });
 
-  const s = await call(settle, { method: "POST", body: { userId: 2, amount: 440 } });
-  check("settle ok", s.body.ok === true, s.body);
+  const st = await call(settle, { method: "POST", body: { userId: 2, amount: 440 } });
+  check("settle ok", st.body.ok === true, st.body);
 
   // PIN gate
   process.env.APP_PIN = "9";

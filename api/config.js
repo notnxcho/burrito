@@ -10,7 +10,6 @@ export default handler(
       needsPin: !!c.pin,
       currency: c.currency,
       defaultPrice: c.defaultPrice,
-      firstTimePrice: c.firstTimePrice,
     };
   },
   { pin: false }

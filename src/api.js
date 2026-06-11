@@ -26,21 +26,6 @@ export async function api(path, { method = "GET", body } = {}) {
   return data;
 }
 
-// Per-person custom prices live on this device (localStorage).
-export function loadCustomPrices() {
-  try {
-    return JSON.parse(localStorage.getItem("burrito_custom") || "{}");
-  } catch {
-    return {};
-  }
-}
-export function saveCustomPrice(id, price) {
-  const all = loadCustomPrices();
-  if (price === "" || price == null) delete all[id];
-  else all[id] = Number(price);
-  localStorage.setItem("burrito_custom", JSON.stringify(all));
-  return all;
-}
 
 export const money = (n, currency = "UYU") =>
   `$${Number(n).toLocaleString("es-UY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;

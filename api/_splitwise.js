@@ -9,7 +9,6 @@ export function cfg() {
     groupId: process.env.SPLITWISE_GROUP_ID || "",
     currency: process.env.CURRENCY || "UYU",
     defaultPrice: Number(process.env.DEFAULT_PRICE || 440),
-    firstTimePrice: Number(process.env.FIRST_TIME_PRICE || 390),
     pin: process.env.APP_PIN || "",
   };
 }
@@ -17,7 +16,7 @@ export function cfg() {
 export const num = (v) => Number(v || 0);
 
 export const isBurrito = (e) =>
-  !e.payment && typeof e.description === "string" && e.description.includes("Burrito");
+  !e.payment && typeof e.description === "string" && e.description.trimStart().startsWith("🌯");
 
 export async function sw(method, endpoint, body) {
   const c = cfg();

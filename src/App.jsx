@@ -1,18 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { api, getPin, setPin, loadCustomPrices, saveCustomPrice, money, initials } from "./api.js";
+import { api, getPin, setPin, money, initials } from "./api.js";
 
 export default function App() {
   const [config, setConfig] = useState(null);
   const [members, setMembers] = useState([]);
   const [currency, setCurrency] = useState("UYU");
-  const [tab, setTab] = useState("charge");
-  const [query, setQuery] = useState("");
-  const [custom, setCustom] = useState(loadCustomPrices());
-  const [sheet, setSheet] = useState(null); // a member object, or {settings:true}
+  const [tab, setTab] = useState("sell");
+  const [sheet, setSheet] = useState(null); // a member (people mark-paid) or {settings:true}
   const [needPin, setNeedPin] = useState(false);
   const [fatal, setFatal] = useState("");
   const [ready, setReady] = useState(false);
   const [toast, setToast] = useState(null);
+  const [sellTitle, setSellTitle] = useState("");
+  const [sellItems, setSellItems] = useState([]); // [{ id, name, price }]
 
   const toastTimer = useRef();
   const showToast = (msg, err = false) => {
@@ -20,8 +20,6 @@ export default function App() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   };
-
-  const priceFor = (m) => (custom[m.id] != null ? Number(custom[m.id]) : m.basePrice);
 
   async function loadMembers() {
     const d = await api("members");
@@ -37,6 +35,7 @@ export default function App() {
       cfg = await api("config");
     } catch {
       setFatal("Can't reach the server.");
+      setReady(true);
       return;
     }
     setConfig(cfg);
@@ -77,14 +76,14 @@ export default function App() {
         </Panel>
       </Shell>
     );
-  if (config && !config.hasToken) return <Shell><NeedEnv what="token" /></Shell>;
+  if (config && !config.hasToken) return <Shell><NeedEnv /></Shell>;
   if (config && !config.hasGroup) return <Shell><NeedGroup /></Shell>;
   if (needPin)
     return (
       <Shell>
         <PinGate
           onUnlock={async (pin) => {
-            setPin(pin); // api() reads it from localStorage
+            setPin(pin);
             try {
               await loadMembers();
               setNeedPin(false);
@@ -97,17 +96,16 @@ export default function App() {
       </Shell>
     );
 
-  /* ---------- main ---------- */
-  const filtered = members.filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));
-
-  async function doCharge(m, price) {
+  /* ---------- actions ---------- */
+  async function doSell(title, items) {
     try {
-      const { cost } = await api("charge", { method: "POST", body: { userId: m.id, price } });
-      setSheet(null);
-      showToast(`Charged ${money(cost, currency)} to ${m.name.split(" ")[0]} 🌯`);
+      const { total, count } = await api("sell", { method: "POST", body: { title, items } });
+      showToast(`Sold ${count} 🌯 — ${money(total, currency)}`);
       await loadMembers();
+      return true;
     } catch (e) {
       showToast(e.message, true);
+      return false;
     }
   }
   async function doSettle(m) {
@@ -120,51 +118,28 @@ export default function App() {
       showToast(e.message, true);
     }
   }
-  function setCustomPrice(m, value) {
-    setCustom(saveCustomPrice(m.id, value));
-    setSheet(null);
-    showToast(value === "" ? "Custom price cleared" : "Default price saved");
-  }
 
   return (
     <Shell onGear={() => setSheet({ settings: true })}>
-      {tab === "charge" ? (
-        <>
-          <div className="search">
-            <span className="icon">🔎</span>
-            <input
-              placeholder="Search a coworker…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-          </div>
-          <div className="list">
-            {filtered.length ? (
-              filtered.map((m) => (
-                <PersonRow key={m.id} m={m} price={priceFor(m)} currency={currency} onClick={() => setSheet(m)} />
-              ))
-            ) : (
-              <div className="empty">No matches.</div>
-            )}
-          </div>
-        </>
-      ) : (
-        <HistoryView currency={currency} />
+      {tab === "sell" && (
+        <SellView
+          members={members}
+          currency={currency}
+          defaultPrice={config?.defaultPrice ?? 440}
+          onSell={doSell}
+          title={sellTitle}
+          setTitle={setSellTitle}
+          items={sellItems}
+          setItems={setSellItems}
+        />
       )}
+      {tab === "people" && <PeopleView members={members} currency={currency} onPick={(m) => setSheet(m)} />}
+      {tab === "history" && <HistoryView currency={currency} />}
 
       <TabBar tab={tab} setTab={setTab} />
 
       {sheet && !sheet.settings && (
-        <ChargeSheet
-          m={sheet}
-          price={priceFor(sheet)}
-          customPrice={custom[sheet.id] ?? ""}
-          currency={currency}
-          onClose={() => setSheet(null)}
-          onCharge={doCharge}
-          onSettle={doSettle}
-          onSaveCustom={setCustomPrice}
-        />
+        <PersonSheet m={sheet} currency={currency} onClose={() => setSheet(null)} onSettle={doSettle} />
       )}
       {sheet && sheet.settings && (
         <SettingsSheet
@@ -184,7 +159,161 @@ export default function App() {
   );
 }
 
-/* ----------------------------- presentational ----------------------------- */
+/* ----------------------------- sell ----------------------------- */
+function SellView({ members, currency, defaultPrice, onSell, title, setTitle, items, setItems }) {
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const inSell = new Set(items.map((it) => it.id));
+  const total = items.reduce((s, it) => s + (Number(it.price) || 0), 0);
+  const canCreate = items.some((it) => Number(it.price) > 0) && !busy;
+
+  function addPerson(m) {
+    if (inSell.has(m.id)) return;
+    setItems((xs) => [...xs, { id: m.id, name: m.name, price: defaultPrice }]);
+  }
+  function setPrice(id, value) {
+    setItems((xs) => xs.map((it) => (it.id === id ? { ...it, price: value } : it)));
+  }
+  function remove(id) {
+    setItems((xs) => xs.filter((it) => it.id !== id));
+  }
+  async function create() {
+    setBusy(true);
+    const payload = items
+      .map((it) => ({ userId: it.id, price: Number(it.price) || 0 }))
+      .filter((it) => it.price > 0);
+    const ok = await onSell(title, payload);
+    setBusy(false);
+    if (ok) {
+      setTitle("");
+      setItems([]);
+    }
+  }
+
+  return (
+    <>
+      <div className="row" style={{ marginTop: 0 }}>
+        <input className="titlein" placeholder="What's this sell? (e.g. Burritos Friday)" value={title} onChange={(e) => setTitle(e.target.value)} />
+      </div>
+
+      <div className="list" style={{ marginTop: 12 }}>
+        {items.length ? (
+          items.map((it) => (
+            <div key={it.id} className="person" style={{ cursor: "default" }}>
+              <div className="avatar">{initials(it.name)}</div>
+              <div className="info"><div className="name">{it.name}</div></div>
+              <input
+                className="pricein"
+                type="number"
+                inputMode="numeric"
+                value={it.price}
+                onChange={(e) => setPrice(it.id, e.target.value)}
+              />
+              <button className="rm" onClick={() => remove(it.id)} title="Remove">✕</button>
+            </div>
+          ))
+        ) : (
+          <div className="empty">No buyers yet — add who bought.</div>
+        )}
+      </div>
+
+      <button className="btn btn-ghost" onClick={() => setPicking(true)}>+ Add buyers</button>
+      <button className="btn btn-primary" disabled={!canCreate} onClick={create}>
+        {busy ? "Creating…" : `Create sell — ${money(total, currency)}`}
+      </button>
+
+      {picking && (
+        <MemberPicker members={members} currency={currency} inSell={inSell} onAdd={addPerson} onClose={() => setPicking(false)} />
+      )}
+    </>
+  );
+}
+
+function MemberPicker({ members, currency, inSell, onAdd, onClose }) {
+  const [query, setQuery] = useState("");
+  const filtered = members.filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));
+  return (
+    <Scrim onClose={onClose}>
+      <h2>Add buyers</h2>
+      <div className="search" style={{ marginTop: 8 }}>
+        <span className="icon">🔎</span>
+        <input placeholder="Search a coworker…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
+      </div>
+      <div className="list pickerlist">
+        {filtered.length ? (
+          filtered.map((m) => (
+            <button key={m.id} className="person" onClick={() => onAdd(m)} disabled={inSell.has(m.id)}>
+              <div className="avatar" style={m.picture ? { backgroundImage: `url('${m.picture}')` } : undefined}>
+                {m.picture ? "" : initials(m.name)}
+              </div>
+              <div className="info">
+                <div className="name">{m.name}</div>
+                <div className="sub">{m.owes > 0 ? <span className="owes">owes {money(m.owes, currency)}</span> : "all settled"}</div>
+              </div>
+              <span className="pricepill ghostpill">{inSell.has(m.id) ? "added" : "+"}</span>
+            </button>
+          ))
+        ) : (
+          <div className="empty">No matches.</div>
+        )}
+      </div>
+      <button className="btn btn-primary" onClick={onClose}>Done</button>
+    </Scrim>
+  );
+}
+
+/* ----------------------------- people ----------------------------- */
+function PeopleView({ members, currency, onPick }) {
+  const [query, setQuery] = useState("");
+  const filtered = members.filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));
+  return (
+    <>
+      <div className="search">
+        <span className="icon">🔎</span>
+        <input placeholder="Search a coworker…" value={query} onChange={(e) => setQuery(e.target.value)} />
+      </div>
+      <div className="list">
+        {filtered.length ? (
+          filtered.map((m) => (
+            <button key={m.id} className="person" onClick={() => onPick(m)}>
+              <div className="avatar" style={m.picture ? { backgroundImage: `url('${m.picture}')` } : undefined}>
+                {m.picture ? "" : initials(m.name)}
+              </div>
+              <div className="info">
+                <div className="name">{m.name}</div>
+                <div className="sub">{m.owes > 0 ? <span className="owes">owes {money(m.owes, currency)}</span> : "all settled"}</div>
+              </div>
+              {m.owes > 0 && <span className="pricepill ghostpill">{money(m.owes, currency)}</span>}
+            </button>
+          ))
+        ) : (
+          <div className="empty">No matches.</div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function PersonSheet({ m, currency, onClose, onSettle }) {
+  const first = m.name.split(" ")[0];
+  return (
+    <Scrim onClose={onClose}>
+      <h2>{m.name}</h2>
+      <div className="meta">{m.owes > 0 ? <>Currently owes you <b>{money(m.owes, currency)}</b></> : "All settled up"}</div>
+      {m.owes > 0 ? (
+        <button className="btn btn-green" onClick={() => onSettle(m)}>
+          Mark paid (clear {money(m.owes, currency)})
+        </button>
+      ) : (
+        <p style={{ color: "var(--muted)", fontSize: 14 }}>{first} has nothing outstanding.</p>
+      )}
+      <button className="muted-link" onClick={onClose}>Close</button>
+    </Scrim>
+  );
+}
+
+/* ----------------------------- shared / presentational ----------------------------- */
 function Shell({ children, onGear }) {
   return (
     <>
@@ -219,76 +348,13 @@ function Panel({ title, children }) {
   );
 }
 
-function PersonRow({ m, price, currency, onClick }) {
-  return (
-    <button className="person" onClick={onClick}>
-      <div className="avatar" style={m.picture ? { backgroundImage: `url('${m.picture}')` } : undefined}>
-        {m.picture ? "" : initials(m.name)}
-      </div>
-      <div className="info">
-        <div className="name">
-          {m.name} {m.firstTime && <span className="tag">1st · {money(price, currency)}</span>}
-        </div>
-        <div className="sub">{m.owes > 0 ? <span className="owes">owes {money(m.owes, currency)}</span> : "all settled"}</div>
-      </div>
-      <span className="pricepill">{money(price, currency)}</span>
-    </button>
-  );
-}
-
-function ChargeSheet({ m, price, customPrice, currency, onClose, onCharge, onSettle, onSaveCustom }) {
-  const [p, setP] = useState(price);
-  const [cust, setCust] = useState(customPrice);
-  const first = m.name.split(" ")[0];
-  return (
-    <Scrim onClose={onClose}>
-      <h2>
-        {m.name} {m.firstTime && <span className="tag">first burrito</span>}
-      </h2>
-      <div className="meta">{m.owes > 0 ? <>Currently owes you <b>{money(m.owes, currency)}</b></> : "All settled up"}</div>
-
-      <div className="row">
-        <label>Price for this burrito</label>
-        <input type="number" inputMode="numeric" value={p} onChange={(e) => setP(e.target.value)} />
-      </div>
-      <button className="btn btn-primary" onClick={() => onCharge(m, Number(p) || price)}>
-        Charge {money(Number(p) || price, currency)}
-      </button>
-
-      {m.owes > 0 && (
-        <button className="btn btn-green" onClick={() => onSettle(m)}>
-          Mark paid (clear {money(m.owes, currency)})
-        </button>
-      )}
-
-      <div className="row" style={{ marginTop: 18 }}>
-        <label>
-          Default price for {first}
-          <br />
-          <small>(overrides 1st/regular, this device)</small>
-        </label>
-        <input type="number" inputMode="numeric" placeholder="auto" value={cust} onChange={(e) => setCust(e.target.value)} />
-      </div>
-      <button className="muted-link" onClick={() => onSaveCustom(m, cust)}>
-        Save their default price
-      </button>
-      <button className="muted-link" onClick={onClose}>
-        Close
-      </button>
-    </Scrim>
-  );
-}
-
 function SettingsSheet({ config, currency, onClose, onForgetPin }) {
   return (
     <Scrim onClose={onClose}>
       <h2>Settings</h2>
-      <div className="meta">
-        Currency: {currency} · Regular {money(config.defaultPrice, currency)} · First-time {money(config.firstTimePrice, currency)}
-      </div>
+      <div className="meta">Currency: {currency} · Regular {money(config.defaultPrice, currency)}</div>
       <p style={{ fontSize: 13, color: "var(--muted)" }}>
-        Token, group and prices are set via environment variables on Vercel. Per-person custom
-        prices are saved on this device.
+        Token, group and the regular price are set via environment variables on Vercel.
       </p>
       <button className="btn btn-ghost" onClick={onForgetPin}>Forget PIN on this device</button>
       <button className="muted-link" onClick={onClose}>Close</button>
@@ -299,9 +365,13 @@ function SettingsSheet({ config, currency, onClose, onForgetPin }) {
 function TabBar({ tab, setTab }) {
   return (
     <div className="tabbar">
-      <button className={tab === "charge" ? "active" : ""} onClick={() => setTab("charge")}>
+      <button className={tab === "sell" ? "active" : ""} onClick={() => setTab("sell")}>
         <span className="t">🌯</span>
-        <span className="l">Charge</span>
+        <span className="l">Sell</span>
+      </button>
+      <button className={tab === "people" ? "active" : ""} onClick={() => setTab("people")}>
+        <span className="t">👥</span>
+        <span className="l">People</span>
       </button>
       <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
         <span className="t">📜</span>
@@ -338,17 +408,17 @@ function HistoryView({ currency }) {
             const when = dt.toLocaleString("es-UY", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
             return (
               <div key={h.id} className="person" style={{ cursor: "default" }}>
-                <div className="avatar">{initials(h.name)}</div>
+                <div className="avatar">🌯</div>
                 <div className="info">
-                  <div className="name">{h.name}</div>
-                  <div className="sub">{when}</div>
+                  <div className="name">{h.title}</div>
+                  <div className="sub">{h.count} {h.count === 1 ? "person" : "people"} · {when}</div>
                 </div>
-                <span className="pricepill ghostpill">{money(h.cost, currency)}</span>
+                <span className="pricepill ghostpill">{money(h.total, currency)}</span>
               </div>
             );
           })
         ) : (
-          <div className="empty">No burritos sold yet.</div>
+          <div className="empty">No sells yet.</div>
         )}
       </div>
     </>
